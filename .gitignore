@@ -8,3 +8,6 @@ wheels/
 .env
 # Virtual environments
 .venv
+DataCache/
+logs/
+activate/
