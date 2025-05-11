@@ -19,11 +19,8 @@ os.makedirs(log_dir, exist_ok=True)
 # Configure logging
 log_file = os.path.join(log_dir, 'nsei_mcp_server.log')
 
-# Create formatters and handlers
+# Create formatter
 file_formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-console_formatter = logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
@@ -36,24 +33,19 @@ file_handler = RotatingFileHandler(
 file_handler.setFormatter(file_formatter)
 file_handler.setLevel(logging.DEBUG)
 
-
-# Console handler
-
-console_handler = logging.StreamHandler(sys.stderr)
-console_handler.setFormatter(console_formatter)
-console_handler.setLevel(logging.INFO)
-
 # Configure root logger
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
 root_logger.addHandler(file_handler)
-root_logger.addHandler(console_handler)
+
+# Redirect stderr to log file
+sys.stderr = open(log_file, 'a')
 
 # Create logger for this module
 logger = logging.getLogger('nsei_mcp_server')
 logger.info(f"Logging to file: {log_file}")
 
-trades = pd.DataFrame() # global cache of trades
+trades = pd.DataFrame() # TODO: implement global cache of trades 
 
 def _post_process_bhav_copy(df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -219,43 +211,55 @@ def _get_data_for_date_range(date: str, ndays: int):
 mcp = FastMCP("nsei")
 logger.info("Server initialization complete")
 
-@mcp.resource("nsei://trades/{date}")
-async def trades(date: str):
-    """
-    Get trades for the given date
+@mcp.tool()
+async def get_trades(date: str, ndays: int = 1, symbol: str = None) -> Dict:
+    """Get trades for a specific symbol or all symbols for a given date range.
     
     Args:
-        date: Date in format: "YYYY-MM-DD"
-        
+        date: Date in format 'YYYY-MM-DD'
+        ndays: integer number of days leading up to date. default is 1
+        symbol: symbol to get trades for. default is None
     Returns:
-        a JSON specifying the trades.
+        Dictionary containing trades for the given symbol or all symbols
     """
-    logger.info(f"Fetching trades for date: {date}")
-    try:
-        # Convert date format from YYYY-MM-DD to YYYYMMDD for bhav copy
-        date_obj = datetime.strptime(date, "%Y-%m-%d")
-        formatted_date = date_obj.strftime("%Y%m%d")
-        
-        # Download bhav copy for the specified date
-        df = _download_bhav_copy(formatted_date)
-        
-        if df is None or df.empty:
-            logger.warning(f"No data available for date: {date}")
-            return {"error": "No data available for the specified date"}
-        
-        # Convert DataFrame to JSON
-        result = df.to_dict(orient='records')
-        logger.info(f"Successfully retrieved {len(result)} records for date: {date}")
-        logger.info(f"Sample records: {df.head()}")
+    logger.info(f"Starting get_trades for date: {date}, ndays: {ndays}, symbol: {symbol}")
 
-        return result
-    except Exception as e:
-        logger.error(f"Error retrieving trades for date {date}: {str(e)}", exc_info=True)
-        return {"error": f"Failed to retrieve trades: {str(e)}"}
+    # Get data from cache for the date range
+    df = _get_data_for_date_range(date, ndays)
+    if df is None or len(df) == 0:
+        logger.error("Error: No data available for the specified date range")
+        return {"error": "No data available for the specified date range"}
+    
+    # Filter data by symbol if provided
+    if symbol:
+        df = df[df['TckrSymb'] == symbol]
+    
+    # Group by symbol and calculate total trades and value
+    trades = df.groupby('TckrSymb').agg({
+        'TradDt': 'first',
+        'OpnPric': 'first',
+        'ClsPric': 'last',
+        'TtlTradgVol': 'sum',
+        'TtlTrfVal': 'sum'
+    }).reset_index()
+
+    # Format the results
+    def format_trades(df):
+        # Reset index to make sure we have unique indices before converting to dict
+        df_reset = df.reset_index()
+        # Use records orient instead of index to avoid unique index requirement
+        return df_reset.round(2).to_dict('records')
+    
+    result = {
+        "trades": format_trades(trades)
+    }   
+
+    logger.info(f"Successfully retrieved trades for {symbol} in date range {date} to {ndays} days ago")
+    return result       
     
 @mcp.tool()
 async def get_top_movers(date: str, ndays: int = 1) -> Dict:
-    """Get top movers for a period of ndays upto the given date.
+    """Get top movers at the National Stock Exchange of India for a period of ndays upto the given date.
     
     Args:
         date: Date in format 'YYYY-MM-DD'
@@ -346,6 +350,7 @@ async def get_top_movers(date: str, ndays: int = 1) -> Dict:
     
     logger.info("Successfully generated top movers report")
     return result
+
 
 if __name__ == "__main__":
     # Initialize and run the server
